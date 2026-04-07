@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "ds18b20.h"
+#include "serial.h"
 
 // LED output (attach LED+resistor to PC0 / DIP pin 23, or change these defines)
 #define LED_DDR  DDRC
@@ -58,40 +59,21 @@ static void led_show_f_x10(int16_t f_x10)
     _delay_ms(1200);
 }
 
-// ---- UART (9600 8N1) on PD1 (TXD) ----
-#define BAUD 9600UL
-#define UBRR_VALUE ((F_CPU / (16UL * BAUD)) - 1)
-
-static void uart_init(void)
+static void serial_out_str(const char *s)
 {
-    UBRR0H = (uint8_t)(UBRR_VALUE >> 8);
-    UBRR0L = (uint8_t)(UBRR_VALUE & 0xFF);
-    UCSR0A = 0;
-    UCSR0B = (1 << TXEN0);
-    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); // 8N1
+    while (*s) serial_out(*s++);
 }
 
-static void uart_putc(char c)
-{
-    while (!(UCSR0A & (1 << UDRE0))) {}
-    UDR0 = (uint8_t)c;
-}
-
-static void uart_puts(const char *s)
-{
-    while (*s) uart_putc(*s++);
-}
-
-static void uart_put_u16(uint16_t v)
+static void serial_out_u16(uint16_t v)
 {
     char buf[6];
     uint8_t i = 0;
-    if (v == 0) { uart_putc('0'); return; }
+    if (v == 0) { serial_out('0'); return; }
     while (v && i < sizeof(buf)) {
         buf[i++] = (char)('0' + (v % 10));
         v /= 10;
     }
-    while (i--) uart_putc(buf[i]);
+    while (i--) serial_out(buf[i]);
 }
 
 // Convert DS18B20 raw temp (Celsius * 16) to Fahrenheit * 10 (one decimal place).
@@ -110,13 +92,13 @@ static int16_t c_x16_to_f_x10(int16_t c_x16)
     return (int16_t)f_x10;
 }
 
-static void uart_put_f_x10(int16_t f_x10)
+static void serial_out_f_x10(int16_t f_x10)
 {
     int32_t v = (int32_t)f_x10;
-    if (v < 0) { uart_putc('-'); v = -v; }
-    uart_put_u16((uint16_t)(v / 10));
-    uart_putc('.');
-    uart_putc((char)('0' + (uint8_t)(v % 10)));
+    if (v < 0) { serial_out('-'); v = -v; }
+    serial_out_u16((uint16_t)(v / 10));
+    serial_out('.');
+    serial_out((char)('0' + (uint8_t)(v % 10)));
 }
 
 static uint8_t read_raw_c_x16_from_sensor(int16_t *out_c_x16)
@@ -142,10 +124,19 @@ int main(void)
     LED_DDR |= (1 << LED_BIT);
     led_off();
 
-    uart_init();
+    serial_init();
+    serial_out_str("BOOT\r\n");
+
+    // Lab 4 transmit test: if serial is wired/configured correctly,
+    // you should immediately see a burst of 'A' characters.
+    for (uint16_t i = 0; i < 200; i++) {
+        serial_out('A');
+        _delay_ms(5);
+    }
+    serial_out_str("\r\n");
 
     if (!ds_init()) {
-        uart_puts("ERR\r\n");
+        serial_out_str("ERR\r\n");
     }
 
     while (1) {
@@ -164,11 +155,11 @@ int main(void)
 
         if (ok) {
             int16_t f_x10 = c_x16_to_f_x10(c_x16);
-            uart_put_f_x10(f_x10);
-            uart_puts("\r\n");
+            serial_out_f_x10(f_x10);
+            serial_out_str("\r\n");
             led_show_f_x10(f_x10);
         } else {
-            uart_puts("ERR\r\n");
+            serial_out_str("ERR\r\n");
             // error pattern: three long pulses
             led_pulse_ms(500, 200);
             led_pulse_ms(500, 200);

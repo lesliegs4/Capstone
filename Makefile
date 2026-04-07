@@ -1,7 +1,8 @@
 DEVICE     = atmega328p
 CLOCK      = 7372800
 PROGRAMMER = -c usbtiny -P usb
-OBJECTS    = at328.o ds18b20.o
+MAIN_OBJS  = at328.o
+TEMP_TEST_OBJS = temp_test.o ds18b20.o serial.o
 FUSES      = -U hfuse:w:0xd9:m -U lfuse:w:0xe0:m
 #
 # Optional: slow down ISP clock if initialization fails.
@@ -37,7 +38,7 @@ COMPILE = avr-gcc -Wall -Os -DF_CPU=$(CLOCK) -mmcu=$(DEVICE) $(CFLAGS)
 # symbolic targets:
 all:	main.hex
 
-.PHONY: all flash fuse install load clean disasm cpp temp_test flash_temp_test test test_ds18b20
+.PHONY: all flash fuse install load clean disasm cpp temp_test flash_temp_test test test_ds18b20 main build_main build_temp_test serial ds18b20
 
 # ---- Serial monitor (macOS) ----
 # Usage:
@@ -79,6 +80,12 @@ flash:	all
 
 temp_test: temp_test.hex
 
+main: main.hex
+build_main: main.hex
+build_temp_test: temp_test.hex
+serial: serial.o
+ds18b20: ds18b20.o
+
 flash_temp_test: temp_test.hex
 	$(AVRDUDE) -U flash:w:temp_test.hex:i
 
@@ -93,19 +100,19 @@ load: all
 	bootloadHID main.hex
 
 clean:
-	rm -f main.hex main.elf $(OBJECTS)
+	rm -f *.o *.elf *.hex
 
 # file targets:
-main.elf: $(OBJECTS)
-	$(COMPILE) -o main.elf $(OBJECTS)
+main.elf: $(MAIN_OBJS)
+	$(COMPILE) -o main.elf $(MAIN_OBJS)
 
 main.hex: main.elf
 	rm -f main.hex
 	avr-objcopy -j .text -j .data -O ihex main.elf main.hex
 	avr-size --format=avr --mcu=$(DEVICE) main.elf
 
-temp_test.elf: temp_test.o ds18b20.o
-	$(COMPILE) -o temp_test.elf temp_test.o ds18b20.o
+temp_test.elf: temp_test.o ds18b20.o serial.o
+	$(COMPILE) -o temp_test.elf temp_test.o ds18b20.o serial.o
 
 temp_test.hex: temp_test.elf
 	rm -f temp_test.hex
