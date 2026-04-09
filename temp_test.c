@@ -34,20 +34,20 @@ static void led_blink_digit(uint8_t d)
     _delay_ms(400);
 }
 
-static void led_show_f_x10(int16_t f_x10)
+static void led_show_c_x10(int16_t c_x10)
 {
     // Frame marker
     led_pulse_ms(80, 120);
     led_pulse_ms(80, 300);
 
-    if (f_x10 < 0) {
+    if (c_x10 < 0) {
         // Negative marker
         led_pulse_ms(400, 400);
-        f_x10 = (int16_t)-f_x10;
+        c_x10 = (int16_t)-c_x10;
     }
 
-    uint16_t v = (uint16_t)f_x10;
-    uint8_t tens  = (uint8_t)((v / 100) % 10); // 10s place of integer F
+    uint16_t v = (uint16_t)c_x10;
+    uint8_t tens  = (uint8_t)((v / 100) % 10); // 10s place of integer C
     uint8_t ones  = (uint8_t)((v / 10)  % 10); // 1s place
     uint8_t tenth = (uint8_t)(v % 10);         // .1 place
 
@@ -76,25 +76,23 @@ static void serial_out_u16(uint16_t v)
     while (i--) serial_out(buf[i]);
 }
 
-// Convert DS18B20 raw temp (Celsius * 16) to Fahrenheit * 10 (one decimal place).
+// Convert DS18B20 raw temp (Celsius * 16) to Celsius * 10 (one decimal place).
 // raw format: signed 16-bit two's complement, LSB = 1/16 °C.
-static int16_t c_x16_to_f_x10(int16_t c_x16)
+static int16_t c_x16_to_c_x10(int16_t c_x16)
 {
-    // F = C * 9/5 + 32
-    // (F * 10) = (C * 10) * 9/5 + 320
-    // C = c_x16 / 16  =>  (F * 10) = c_x16 * 90 / 80 + 320
-    int32_t num = (int32_t)c_x16 * 90;
-    if (num >= 0) num += 40;   // round to nearest tenth
-    else          num -= 40;
-    int32_t f_x10 = (num / 80) + 320;
-    if (f_x10 > INT16_MAX) return INT16_MAX;
-    if (f_x10 < INT16_MIN) return INT16_MIN;
-    return (int16_t)f_x10;
+    // (C * 10) = (c_x16 * 10) / 16
+    int32_t num = (int32_t)c_x16 * 10;
+    if (num >= 0) num += 8;   // round to nearest tenth
+    else          num -= 8;
+    int32_t c_x10 = num / 16;
+    if (c_x10 > INT16_MAX) return INT16_MAX;
+    if (c_x10 < INT16_MIN) return INT16_MIN;
+    return (int16_t)c_x10;
 }
 
-static void serial_out_f_x10(int16_t f_x10)
+static void serial_out_c_x10(int16_t c_x10)
 {
-    int32_t v = (int32_t)f_x10;
+    int32_t v = (int32_t)c_x10;
     if (v < 0) { serial_out('-'); v = -v; }
     serial_out_u16((uint16_t)(v / 10));
     serial_out('.');
@@ -127,14 +125,6 @@ int main(void)
     serial_init();
     serial_out_str("BOOT\r\n");
 
-    // Lab 4 transmit test: if serial is wired/configured correctly,
-    // you should immediately see a burst of 'A' characters.
-    for (uint16_t i = 0; i < 200; i++) {
-        serial_out('A');
-        _delay_ms(5);
-    }
-    serial_out_str("\r\n");
-
     if (!ds_init()) {
         serial_out_str("ERR\r\n");
     }
@@ -144,7 +134,7 @@ int main(void)
         uint8_t ok;
 
         // For conversion testing without hardware, define TEST_RAW_C_X16.
-        // Example from datasheet: 0x0191 = 25.0625C => 77.1F
+        // Example from datasheet: 0x0191 = 25.0625C
         // #define TEST_RAW_C_X16 0x0191
 #ifdef TEST_RAW_C_X16
         c_x16 = (int16_t)TEST_RAW_C_X16;
@@ -154,10 +144,10 @@ int main(void)
 #endif
 
         if (ok) {
-            int16_t f_x10 = c_x16_to_f_x10(c_x16);
-            serial_out_f_x10(f_x10);
+            int16_t c_x10 = c_x16_to_c_x10(c_x16);
+            serial_out_c_x10(c_x10);
             serial_out_str("\r\n");
-            led_show_f_x10(f_x10);
+            led_show_c_x10(c_x10);
         } else {
             serial_out_str("ERR\r\n");
             // error pattern: three long pulses
