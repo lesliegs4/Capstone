@@ -3,6 +3,7 @@ CLOCK      = 7372800
 PROGRAMMER = -c usbtiny -P usb
 MAIN_OBJS  = at328.o
 TEMP_TEST_OBJS = temp_test.o ds18b20.o serial.o
+ETAPE_TEST_OBJS = etape_test.o serial.o
 FUSES      = -U hfuse:w:0xd9:m -U lfuse:w:0xe0:m
 #
 # Optional: slow down ISP clock if initialization fails.
@@ -38,7 +39,7 @@ COMPILE = avr-gcc -Wall -Os -DF_CPU=$(CLOCK) -mmcu=$(DEVICE) $(CFLAGS)
 # symbolic targets:
 all:	main.hex
 
-.PHONY: all flash fuse install load clean disasm cpp temp_test flash_temp_test test test_ds18b20 main build_main build_temp_test serial ds18b20
+.PHONY: all flash fuse install load clean disasm cpp temp_test flash_temp_test etape_test flash_etape_test test test_ds18b20 main build_main build_temp_test build_etape_test serial ds18b20
 
 # ---- Serial monitor (macOS) ----
 # Usage:
@@ -83,11 +84,16 @@ temp_test: temp_test.hex
 main: main.hex
 build_main: main.hex
 build_temp_test: temp_test.hex
+etape_test: etape_test.hex
+build_etape_test: etape_test.hex
 serial: serial.o
 ds18b20: ds18b20.o
 
 flash_temp_test: temp_test.hex
 	$(AVRDUDE) -U flash:w:temp_test.hex:i
+
+flash_etape_test: etape_test.hex
+	$(AVRDUDE) -U flash:w:etape_test.hex:i
 
 fuse:
 	$(AVRDUDE) $(FUSES)
@@ -118,6 +124,14 @@ temp_test.hex: temp_test.elf
 	rm -f temp_test.hex
 	avr-objcopy -j .text -j .data -O ihex temp_test.elf temp_test.hex
 	avr-size --format=avr --mcu=$(DEVICE) temp_test.elf
+
+etape_test.elf: etape_test.o serial.o
+	$(COMPILE) -o etape_test.elf etape_test.o serial.o
+
+etape_test.hex: etape_test.elf
+	rm -f etape_test.hex
+	avr-objcopy -j .text -j .data -O ihex etape_test.elf etape_test.hex
+	avr-size --format=avr --mcu=$(DEVICE) etape_test.elf
 # If you have an EEPROM section, you must also create a hex file for the
 # EEPROM and add it to the "flash" target.
 
