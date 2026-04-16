@@ -4,6 +4,9 @@ PROGRAMMER = -c usbtiny -P usb
 MAIN_OBJS  = at328.o
 TEMP_TEST_OBJS = temp_test.o ds18b20.o serial.o
 ETAPE_TEST_OBJS = etape_test.o serial.o
+SERIAL_A_TEST_OBJS = serial_a_test.o serial.o
+TDS_TEST_OBJS = tds_test.o serial.o
+TDS_TEMP_TEST_OBJS = tds_temp_test.o ds18b20.o serial.o
 FUSES      = -U hfuse:w:0xd9:m -U lfuse:w:0xe0:m
 #
 # Optional: slow down ISP clock if initialization fails.
@@ -34,17 +37,19 @@ AVRDUDE = avrdude $(PROGRAMMER) -p $(DEVICE) $(if $(BITCLOCK),-B $(BITCLOCK),)
 # Extra C flags can be passed on command line, e.g.
 #   make temp_test.hex CFLAGS='-DTEST_RAW_C_X16=0x0191'
 CFLAGS ?=
-COMPILE = avr-gcc -Wall -Os -DF_CPU=$(CLOCK) -mmcu=$(DEVICE) $(CFLAGS)
+# Also define SERIAL_BAUD for firmware builds (serial.c defaults to 9600 if unset).
+# Keeping this in sync with `make monitor SERIAL_BAUD=...` avoids "silent" output.
+COMPILE = avr-gcc -Wall -Os -DF_CPU=$(CLOCK) -DSERIAL_BAUD=$(SERIAL_BAUD) -mmcu=$(DEVICE) $(CFLAGS)
 
 # symbolic targets:
 all:	main.hex
 
-.PHONY: all flash fuse install load clean disasm cpp temp_test flash_temp_test etape_test flash_etape_test test test_ds18b20 main build_main build_temp_test build_etape_test serial ds18b20
+.PHONY: all flash fuse install load clean disasm cpp temp_test flash_temp_test etape_test flash_etape_test serial_a_test flash_serial_a_test tds_test flash_tds_test tds_temp_test flash_tds_temp_test test test_ds18b20 main build_main build_temp_test build_etape_test build_serial_a_test build_tds_test build_tds_temp_test serial ds18b20
 
 # ---- Serial monitor (macOS) ----
 # Usage:
 #   make monitor SERIAL_PORT=/dev/cu.usbserial-XXXX SERIAL_BAUD=9600
-SERIAL_PORT ?= $(firstword $(wildcard /dev/cu.usbserial* /dev/cu.usbmodem*))
+SERIAL_PORT ?= $(firstword $(wildcard /dev/cu.usbserial* /dev/cu.usbmodem* /dev/cu.wchusbserial* /dev/cu.SLAB_USBtoUART* /dev/cu.usb*))
 SERIAL_BAUD ?= 9600
 
 monitor:
@@ -86,6 +91,12 @@ build_main: main.hex
 build_temp_test: temp_test.hex
 etape_test: etape_test.hex
 build_etape_test: etape_test.hex
+serial_a_test: serial_a_test.hex
+build_serial_a_test: serial_a_test.hex
+tds_test: tds_test.hex
+build_tds_test: tds_test.hex
+tds_temp_test: tds_temp_test.hex
+build_tds_temp_test: tds_temp_test.hex
 serial: serial.o
 ds18b20: ds18b20.o
 
@@ -94,6 +105,15 @@ flash_temp_test: temp_test.hex
 
 flash_etape_test: etape_test.hex
 	$(AVRDUDE) -U flash:w:etape_test.hex:i
+
+flash_serial_a_test: serial_a_test.hex
+	$(AVRDUDE) -U flash:w:serial_a_test.hex:i
+
+flash_tds_test: tds_test.hex
+	$(AVRDUDE) -U flash:w:tds_test.hex:i
+
+flash_tds_temp_test: tds_temp_test.hex
+	$(AVRDUDE) -U flash:w:tds_temp_test.hex:i
 
 fuse:
 	$(AVRDUDE) $(FUSES)
@@ -132,6 +152,30 @@ etape_test.hex: etape_test.elf
 	rm -f etape_test.hex
 	avr-objcopy -j .text -j .data -O ihex etape_test.elf etape_test.hex
 	avr-size --format=avr --mcu=$(DEVICE) etape_test.elf
+
+serial_a_test.elf: serial_a_test.o serial.o
+	$(COMPILE) -o serial_a_test.elf serial_a_test.o serial.o
+
+serial_a_test.hex: serial_a_test.elf
+	rm -f serial_a_test.hex
+	avr-objcopy -j .text -j .data -O ihex serial_a_test.elf serial_a_test.hex
+	avr-size --format=avr --mcu=$(DEVICE) serial_a_test.elf
+
+tds_test.elf: $(TDS_TEST_OBJS)
+	$(COMPILE) -o tds_test.elf $(TDS_TEST_OBJS)
+
+tds_test.hex: tds_test.elf
+	rm -f tds_test.hex
+	avr-objcopy -j .text -j .data -O ihex tds_test.elf tds_test.hex
+	avr-size --format=avr --mcu=$(DEVICE) tds_test.elf
+
+tds_temp_test.elf: $(TDS_TEMP_TEST_OBJS)
+	$(COMPILE) -o tds_temp_test.elf $(TDS_TEMP_TEST_OBJS)
+
+tds_temp_test.hex: tds_temp_test.elf
+	rm -f tds_temp_test.hex
+	avr-objcopy -j .text -j .data -O ihex tds_temp_test.elf tds_temp_test.hex
+	avr-size --format=avr --mcu=$(DEVICE) tds_temp_test.elf
 # If you have an EEPROM section, you must also create a hex file for the
 # EEPROM and add it to the "flash" target.
 

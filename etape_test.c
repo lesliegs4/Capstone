@@ -1,72 +1,28 @@
 #include <avr/io.h>
 #include <util/delay.h>
 #include <stdint.h>
-#
+
 #include "serial.h"
-#
+
 #ifndef F_CPU
 #error "F_CPU must be defined (e.g. via -DF_CPU=...)"
 #endif
 
-// -------- User-tunable settings --------
-// ADC channel for the divider node (0..5 => PC0..PC5 on ATmega328P DIP)
-#ifndef ETAPE_ADC_CHANNEL
-#define ETAPE_ADC_CHANNEL 0
-#endif
-
-// Series resistor from ADC node -> VCC (ohms)
-// This matches wiring: GND -> Rsense -> ADC node -> Rseries -> VCC
-#ifndef ETAPE_RSERIES_OHMS
-#define ETAPE_RSERIES_OHMS 560U
-#endif
-
-// If 1, print a scan of ADC0..ADC5 each line (helps find the correct pin)
-#ifndef ETAPE_SCAN_CHANNELS
-#define ETAPE_SCAN_CHANNELS 0
-#endif
-
-// Nominal resistance endpoints for the 12" eTape (ohms).
-// For best accuracy, replace these with your measured empty/full values.
-#ifndef ETAPE_R_EMPTY_OHMS
-#define ETAPE_R_EMPTY_OHMS 2000U
-#endif
-#ifndef ETAPE_R_FULL_OHMS
-#define ETAPE_R_FULL_OHMS  400U
-#endif
-
-// Active length in tenths of an inch. Datasheet: ~12.4" active for the 12" part.
-#ifndef ETAPE_ACTIVE_TENTHS_IN
-#define ETAPE_ACTIVE_TENTHS_IN 124U
-#endif
-
-// How many ADC samples to average each print
-#ifndef ETAPE_SAMPLES
-#define ETAPE_SAMPLES 16U
-#endif
-
-// Print interval (ms)
-#ifndef ETAPE_PRINT_MS
-#define ETAPE_PRINT_MS 1000U
-#endif
-
-// Simple EMA smoothing on ADC (higher = smoother, slower response)
-#ifndef ETAPE_EMA_SHIFT
-#define ETAPE_EMA_SHIFT 3U   // 1/8 new, 7/8 old
-#endif
-
-// --- Calibration ---
-// Your "dry/out of water" screenshot shows adc_filt stabilizing around ~1022.
-// Your "12 inches submerged" screenshot shows adc_filt stabilizing around ~666.
+// Minimal "website style" test (Arduino sketch equivalent)
+// Uses ADC1 (A1 / PC1) and prints:
+//   Analog reading <0..1023>
+//   Sensor resistance <ohms>
+//   Sensor output <kOhms>   (ohms / 1000, matches datasheet y-axis)
+//   Level <in> (<cm>)      (looked up from datasheet curve)
 //
-// Calibrating in ADC-code space is much more stable than calibrating in ohms
-// when the dry reading is near 1023 (which makes computed resistance blow up).
-#ifndef ETAPE_CAL_EMPTY_ADC
-#define ETAPE_CAL_EMPTY_ADC 1022U
-#endif
+// Wiring it assumes:
+//   sensor -> GND, and a known resistor -> VCC, with the ADC at the junction.
 
-#ifndef ETAPE_CAL_FULL_ADC
-#define ETAPE_CAL_FULL_ADC 666U
-#endif
+// the value of the 'other' resistor
+#define SERIESRESISTOR 560U
+
+// What pin to connect the sensor to: A1 = ADC1 = PC1
+#define SENSOR_ADC_CHANNEL 1U
 
 static void serial_out_str(const char *s)
 {
@@ -92,6 +48,18 @@ static void serial_out_fixed_1(uint16_t v_x10)
     serial_out((char)('0' + (uint8_t)(v_x10 % 10U)));
 }
 
+static void serial_out_kohm_x1000(uint16_t r_ohms)
+{
+    // Print kΩ with three decimals, e.g. 1.234
+    uint16_t whole = (uint16_t)(r_ohms / 1000U);
+    uint16_t frac  = (uint16_t)(r_ohms % 1000U);
+    serial_out_u16(whole);
+    serial_out('.');
+    serial_out((char)('0' + (uint8_t)((frac / 100U) % 10U)));
+    serial_out((char)('0' + (uint8_t)((frac / 10U)  % 10U)));
+    serial_out((char)('0' + (uint8_t)( frac        % 10U)));
+}
+
 static void adc_init(uint8_t channel)
 {
     // AVcc reference, right adjust, select ADC channel (0..7)
@@ -109,21 +77,6 @@ static void adc_init(uint8_t channel)
     _delay_ms(2);
 }
 
-static inline void adc_select_channel(uint8_t channel)
-{
-    // Keep REFS/ADLAR, change only MUX bits
-    ADMUX = (ADMUX & 0xF0) | (channel & 0x0F);
-
-    // Disable digital input buffer on the ADC pin (reduces power/noise)
-    if (channel <= 5) {
-        DIDR0 |= (1 << channel);
-    }
-
-    // Throw away first reading after mux change
-    ADCSRA |= (1 << ADSC);
-    while (ADCSRA & (1 << ADSC)) {}
-}
-
 static uint16_t adc_read(void)
 {
     ADCSRA |= (1 << ADSC);
@@ -131,156 +84,122 @@ static uint16_t adc_read(void)
     return (uint16_t)ADC;
 }
 
-static uint16_t adc_read_avg(uint8_t samples)
-{
-    uint32_t acc = 0;
-    for (uint8_t i = 0; i < samples; i++) {
-        acc += adc_read();
-        _delay_ms(1);
-    }
-    return (uint16_t)(acc / samples);
-}
-
-static uint16_t adc_read_avg_channel(uint8_t channel, uint8_t samples)
-{
-    adc_select_channel(channel);
-    return adc_read_avg(samples);
-}
-
-// Compute Rsense (ohms) from ADC code for divider:
-//   GND -> Rsense -> ADC node -> Rseries -> VCC
-// Using Vref = AVcc, the ratio is:
-//   adc/1023 = Rsense / (Rsense + Rseries)
-// => Rsense = Rseries * adc / (1023 - adc)
 static uint16_t rsense_from_adc(uint16_t adc_code)
 {
+    // Equivalent of Arduino sketch:
+    //   x = (1023 / adc) - 1
+    //   Rsense = SERIESRESISTOR / x
+    // => Rsense = SERIESRESISTOR * adc / (1023 - adc)
+    if (adc_code == 0) return 65535U;
     if (adc_code >= 1023U) return 65535U;
-    uint32_t num = (uint32_t)ETAPE_RSERIES_OHMS * (uint32_t)adc_code;
+    uint32_t num = (uint32_t)SERIESRESISTOR * (uint32_t)adc_code;
     uint32_t den = (uint32_t)(1023U - adc_code);
     uint32_t r = num / den;
     if (r > 65535U) r = 65535U;
     return (uint16_t)r;
 }
 
-// Returns percent full in tenths of a percent (0..1000) from filtered ADC code.
-// Handles either orientation (empty > full or empty < full).
-static uint16_t percent_full_x10_from_adc(uint16_t adc_code)
+typedef struct {
+    uint16_t r_ohms;
+    uint16_t in_x10; // inches * 10
+} etape_point_t;
+
+// Approximation from the datasheet "Typical eTape Sensor Output - PN 12110215TC-12" graph.
+// Output resistance decreases as liquid level increases.
+// NOTE: This is "typical" and eTape parts are ±20%; for best accuracy, calibrate.
+static const etape_point_t ETAPE_TABLE[] = {
+    {2250,   0},   // 0.0 in
+    {2250,  10},   // 1.0 in  (actuation depth / dead zone)
+    {2100,  20},   // 2.0 in
+    {1950,  30},   // 3.0 in
+    {1800,  40},   // 4.0 in
+    {1650,  50},   // 5.0 in
+    {1450,  60},   // 6.0 in
+    {1300,  70},   // 7.0 in
+    {1120,  80},   // 8.0 in
+    { 950,  90},   // 9.0 in
+    { 760, 100},   // 10.0 in
+    { 620, 110},   // 11.0 in
+    { 460, 120},   // 12.0 in
+    { 400, 124},   // 12.4 in
+};
+
+static uint16_t in_x10_from_r_table(uint16_t r_ohms)
 {
-    int32_t empty = (int32_t)ETAPE_CAL_EMPTY_ADC;
-    int32_t full  = (int32_t)ETAPE_CAL_FULL_ADC;
-    int32_t a     = (int32_t)adc_code;
+    const uint16_t n = (uint16_t)(sizeof(ETAPE_TABLE) / sizeof(ETAPE_TABLE[0]));
 
-    if (empty == full) return 0;
+    // Above the top point => 0 in
+    if (r_ohms >= ETAPE_TABLE[0].r_ohms) return ETAPE_TABLE[0].in_x10;
+    // Below the last point => max in
+    if (r_ohms <= ETAPE_TABLE[n - 1].r_ohms) return ETAPE_TABLE[n - 1].in_x10;
 
-    // If empty > full (your case): % = (empty - a)/(empty - full)
-    // If empty < full:            % = (a - empty)/(full - empty)
-    int32_t num, den;
-    if (empty > full) {
-        if (a >= empty) return 0;
-        if (a <= full)  return 1000;
-        num = (empty - a) * 1000;
-        den = (empty - full);
-    } else {
-        if (a <= empty) return 0;
-        if (a >= full)  return 1000;
-        num = (a - empty) * 1000;
-        den = (full - empty);
+    for (uint16_t i = 0; i + 1 < n; i++) {
+        uint16_t r0 = ETAPE_TABLE[i].r_ohms;
+        uint16_t r1 = ETAPE_TABLE[i + 1].r_ohms;
+        uint16_t x0 = ETAPE_TABLE[i].in_x10;
+        uint16_t x1 = ETAPE_TABLE[i + 1].in_x10;
+
+        // Table is non-increasing in r_ohms. Find segment where r0 >= r >= r1.
+        if (r0 >= r_ohms && r_ohms >= r1) {
+            uint16_t dr = (uint16_t)(r0 - r1);
+            if (dr == 0) return x1; // flat segment
+            uint16_t dx = (uint16_t)(r0 - r_ohms);
+            uint16_t dd = (uint16_t)((x1 >= x0) ? (x1 - x0) : 0);
+
+            // Linear interpolation: x = x0 + dd * dx / dr
+            uint32_t num = (uint32_t)dd * (uint32_t)dx;
+            uint16_t add = (uint16_t)(num / dr);
+            return (uint16_t)(x0 + add);
+        }
     }
 
-    int32_t p_x10 = num / den;
-    if (p_x10 < 0) p_x10 = 0;
-    if (p_x10 > 1000) p_x10 = 1000;
-    return (uint16_t)p_x10;
+    // Fallback (shouldn't happen)
+    return ETAPE_TABLE[n - 1].in_x10;
 }
 
-static uint16_t level_tenths_in_from_percent_x10(uint16_t percent_x10)
+static uint16_t cm_x10_from_in_x10(uint16_t in_x10)
 {
-    // level = active_len * (percent/100)
-    // Here percent_x10 is 0..1000 (tenths of a percent)
-    // level_tenths_in = active_tenths_in * percent / 100
-    // => active_tenths_in * (percent_x10/10) / 100 = active * percent_x10 / 1000
-    uint32_t v = (uint32_t)ETAPE_ACTIVE_TENTHS_IN * (uint32_t)percent_x10;
-    return (uint16_t)(v / 1000U);
+    // cm_x10 = round(inches * 2.54 * 10) = round(in_x10 * 2.54)
+    // = round(in_x10 * 254 / 100)
+    uint32_t num = (uint32_t)in_x10 * 254U + 50U; // +0.5 for rounding
+    return (uint16_t)(num / 100U);
 }
 
 int main(void)
 {
     serial_init();
-    serial_out_str("ETAPE TEST\r\n");
-    serial_out_str("ADC_CH=");
-    serial_out_u16(ETAPE_ADC_CHANNEL);
-    serial_out_str(" RSER=");
-    serial_out_u16(ETAPE_RSERIES_OHMS);
-    serial_out_str("ohm SAMPLES=");
-    serial_out_u16(ETAPE_SAMPLES);
-    serial_out_str(" PRINT_MS=");
-    serial_out_u16(ETAPE_PRINT_MS);
-    serial_out_str(" SCAN=");
-    serial_out_u16(ETAPE_SCAN_CHANNELS);
-    serial_out_str(" CAL_EMPTY=");
-    serial_out_u16(ETAPE_CAL_EMPTY_ADC);
-    serial_out_str(" CAL_FULL=");
-    serial_out_u16(ETAPE_CAL_FULL_ADC);
+    serial_out_str("ETAPE SIMPLE TEST (A1)\r\n");
+    serial_out_str("SERIESRESISTOR=");
+    serial_out_u16(SERIESRESISTOR);
     serial_out_str("\r\n");
 
-    adc_init(ETAPE_ADC_CHANNEL);
-
-    // Filter state in Q8 fixed-point (adc * 256)
-    uint32_t adc_filt_q8 = 0;
-    uint8_t filt_inited = 0;
+    adc_init(SENSOR_ADC_CHANNEL);
 
     while (1) {
-        uint16_t adc_raw = adc_read_avg_channel((uint8_t)ETAPE_ADC_CHANNEL, (uint8_t)ETAPE_SAMPLES);
-
-        if (!filt_inited) {
-            adc_filt_q8 = ((uint32_t)adc_raw) << 8;
-            filt_inited = 1;
-        } else {
-            int32_t target_q8 = (int32_t)(((uint32_t)adc_raw) << 8);
-            int32_t err = target_q8 - (int32_t)adc_filt_q8;
-            adc_filt_q8 = (uint32_t)((int32_t)adc_filt_q8 + (err >> ETAPE_EMA_SHIFT));
-        }
-
-        uint16_t adc_code = (uint16_t)(adc_filt_q8 >> 8);
-
+        uint16_t adc_code = adc_read();
         uint16_t r_ohms = rsense_from_adc(adc_code);
-        uint16_t pct_x10 = percent_full_x10_from_adc(adc_code);
-        uint16_t sub_tenths_in = level_tenths_in_from_percent_x10(pct_x10);
-        uint16_t from_top_tenths_in = 0;
-        if (sub_tenths_in <= ETAPE_ACTIVE_TENTHS_IN) {
-            from_top_tenths_in = (uint16_t)(ETAPE_ACTIVE_TENTHS_IN - sub_tenths_in);
-        }
+        uint16_t in_x10 = in_x10_from_r_table(r_ohms);
+        uint16_t cm_x10 = cm_x10_from_in_x10(in_x10);
 
-#if ETAPE_SCAN_CHANNELS
-        serial_out_str("scan ");
-        for (uint8_t ch = 0; ch <= 5; ch++) {
-            uint16_t v = adc_read_avg_channel(ch, 8);
-            serial_out('A');
-            serial_out((char)('0' + ch));
-            serial_out('=');
-            serial_out_u16(v);
-            if (ch != 5) serial_out(' ');
-        }
-        serial_out_str(" | ");
-#endif
-
-        serial_out_str("adc_raw=");
-        serial_out_u16(adc_raw);
-        serial_out_str(" adc_filt=");
+        serial_out_str("Analog reading ");
         serial_out_u16(adc_code);
-        serial_out_str(" r=");
-        serial_out_u16(r_ohms);
-        serial_out_str("ohm pct=");
-        serial_out_fixed_1(pct_x10); // tenths of a percent
-        serial_out_str("% sub=");
-        serial_out_fixed_1(sub_tenths_in); // tenths of an inch submerged (from bottom)
-        serial_out_str("in top=");
-        serial_out_fixed_1(from_top_tenths_in); // tenths of an inch from top to surface
-        serial_out_str("in\r\n");
+        serial_out_str("\r\n");
 
-        for (uint16_t i = 0; i < ETAPE_PRINT_MS; i++) {
-            _delay_ms(1);
-        }
+        serial_out_str("Sensor resistance ");
+        serial_out_u16(r_ohms);
+        serial_out_str("\r\n");
+
+        serial_out_str("Sensor output ");
+        serial_out_kohm_x1000(r_ohms);
+        serial_out_str(" kOhms\r\n");
+
+        serial_out_str("Level ");
+        serial_out_fixed_1(in_x10);
+        serial_out_str(" in (");
+        serial_out_fixed_1(cm_x10);
+        serial_out_str(" cm)\r\n");
+
+        _delay_ms(1000);
     }
 }
 
