@@ -8,6 +8,7 @@ SERIAL_A_TEST_OBJS = serial_a_test.o serial.o
 TDS_TEST_OBJS = tds_test.o serial.o
 TDS_TEMP_TEST_OBJS = tds_temp_test.o ds18b20.o serial.o
 RELAY_TEST_OBJS = relay_test.o serial.o
+AS7262_TEST_OBJS = as7262_test.o serial.o
 FUSES      = -U hfuse:w:0xd9:m -U lfuse:w:0xe0:m
 #
 # Optional: slow down ISP clock if initialization fails.
@@ -45,7 +46,7 @@ COMPILE = avr-gcc -Wall -Os -DF_CPU=$(CLOCK) -DSERIAL_BAUD=$(SERIAL_BAUD) -mmcu=
 # symbolic targets:
 all:	main.hex
 
-.PHONY: all flash fuse install load clean disasm cpp temp_test flash_temp_test etape_test flash_etape_test serial_a_test flash_serial_a_test tds_test flash_tds_test tds_temp_test flash_tds_temp_test relay_test flash_relay_test test test_ds18b20 main build_main build_temp_test build_etape_test build_serial_a_test build_tds_test build_tds_temp_test build_relay_test serial ds18b20
+.PHONY: all flash fuse install load clean disasm cpp temp_test flash_temp_test etape_test flash_etape_test serial_a_test flash_serial_a_test tds_test flash_tds_test tds_temp_test flash_tds_temp_test relay_test flash_relay_test as7262_test flash_as7262_test test test_ds18b20 main build_main build_temp_test build_etape_test build_serial_a_test build_tds_test build_tds_temp_test build_relay_test build_as7262_test serial ds18b20
 
 # ---- Serial monitor (macOS) ----
 # Usage:
@@ -100,6 +101,8 @@ tds_temp_test: tds_temp_test.hex
 build_tds_temp_test: tds_temp_test.hex
 relay_test: relay_test.hex
 build_relay_test: relay_test.hex
+as7262_test: as7262_test.hex
+build_as7262_test: as7262_test.hex
 serial: serial.o
 ds18b20: ds18b20.o
 
@@ -120,6 +123,9 @@ flash_tds_temp_test: tds_temp_test.hex
 
 flash_relay_test: relay_test.hex
 	$(AVRDUDE) -U flash:w:relay_test.hex:i
+
+flash_as7262_test: as7262_test.hex
+	$(AVRDUDE) -U flash:w:as7262_test.hex:i
 
 fuse:
 	$(AVRDUDE) $(FUSES)
@@ -190,6 +196,14 @@ relay_test.hex: relay_test.elf
 	rm -f relay_test.hex
 	avr-objcopy -j .text -j .data -O ihex relay_test.elf relay_test.hex
 	avr-size --format=avr --mcu=$(DEVICE) relay_test.elf
+
+as7262_test.elf: $(AS7262_TEST_OBJS)
+	$(COMPILE) -o as7262_test.elf $(AS7262_TEST_OBJS)
+
+as7262_test.hex: as7262_test.elf
+	rm -f as7262_test.hex
+	avr-objcopy -j .text -j .data -O ihex as7262_test.elf as7262_test.hex
+	avr-size --format=avr --mcu=$(DEVICE) as7262_test.elf
 # If you have an EEPROM section, you must also create a hex file for the
 # EEPROM and add it to the "flash" target.
 
