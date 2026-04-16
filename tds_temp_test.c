@@ -12,6 +12,7 @@
 // Combined test: DS18B20 temperature + Gravity TDS (SEN0244)
 // - DS18B20 1-wire bus: PD2 (see ds18b20.c)
 // - TDS analog output: ADC channel below (default ADC1 / PC1 / A1)
+// - IoT Relay II control input: GPIO below (default PD7)
 #
 #ifndef TDS_ADC_CHANNEL
 #define TDS_ADC_CHANNEL 1U  // ADC1 = PC1 = Arduino A1
@@ -35,6 +36,25 @@
 #
 #ifndef SAMPLE_DELAY_MS
 #define SAMPLE_DELAY_MS 40U
+#endif
+#
+// --- Relay output (IoT Relay II low-voltage control input) ---
+// Default GPIO: PD7 (ATmega328P DIP pin 13)
+#ifndef RELAY_DDR
+#define RELAY_DDR  DDRD
+#endif
+#ifndef RELAY_PORT
+#define RELAY_PORT PORTD
+#endif
+#ifndef RELAY_BIT
+#define RELAY_BIT  PD7
+#endif
+#ifndef RELAY_ACTIVE_LOW
+#define RELAY_ACTIVE_LOW 0
+#endif
+#
+#ifndef RELAY_ON_TEMP_C_X10
+#define RELAY_ON_TEMP_C_X10 250   // 25.0C
 #endif
 #
 static void serial_out_str(const char *s)
@@ -85,6 +105,22 @@ static int16_t c_x16_to_c_x10(int16_t c_x16)
     if (c_x10 > INT16_MAX) return INT16_MAX;
     if (c_x10 < INT16_MIN) return INT16_MIN;
     return (int16_t)c_x10;
+}
+#
+static inline void relay_init(void)
+{
+    RELAY_DDR |= (1 << RELAY_BIT);
+}
+#
+static inline void relay_set(uint8_t on)
+{
+#if RELAY_ACTIVE_LOW
+    if (on) RELAY_PORT &= ~(1 << RELAY_BIT);
+    else    RELAY_PORT |=  (1 << RELAY_BIT);
+#else
+    if (on) RELAY_PORT |=  (1 << RELAY_BIT);
+    else    RELAY_PORT &= ~(1 << RELAY_BIT);
+#endif
 }
 #
 static void adc_init(uint8_t channel)
@@ -163,6 +199,9 @@ int main(void)
         serial_out_str("WARN: DS18B20 init failed; using 25.0C compensation\r\n");
     }
 #
+    relay_init();
+    relay_set(0);
+#
     adc_init((uint8_t)TDS_ADC_CHANNEL);
 #
     // Use last-known temperature for compensation if reads occasionally fail.
@@ -204,6 +243,13 @@ int main(void)
 #
         if (temp_sensor_ok && have_temp_this_frame) {
             last_temp_c_x10 = frame_temp_c_x10;
+        }
+#
+        // Lamp control: ON when temp > 25.0C (configurable via RELAY_ON_TEMP_C_X10)
+        if (temp_sensor_ok) {
+            relay_set((uint8_t)(frame_temp_c_x10 > (int16_t)RELAY_ON_TEMP_C_X10));
+        } else {
+            relay_set(0);
         }
 #
         uint16_t adc_med = median_u16(samples, (uint8_t)SCOUNT);
