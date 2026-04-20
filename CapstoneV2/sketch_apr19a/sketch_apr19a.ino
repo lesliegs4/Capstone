@@ -2,72 +2,125 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_AS726x.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 // ----------------------
-// ESP32-C3 I2C Pins
-// Change if needed for your board
+// OLED I2C
 // ----------------------
 #define I2C_SDA 8
 #define I2C_SCL 9
 
 // ----------------------
-// OLED Settings
+// DS18B20
+// ----------------------
+#define TEMP_PIN 4
+
+OneWire oneWire(TEMP_PIN);
+DallasTemperature tempSensor(&oneWire);
+
+// ----------------------
+// OLED
 // ----------------------
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
-#define OLED_ADDR 0x3C
+#define OLED_ADDR 0x3C   // change to 0x3D if needed
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ----------------------
+// Color Sensor
+// ----------------------
 Adafruit_AS726x sensor;
 
-void showMessage(const char* line1, const char* line2 = "") {
+// ----------------------
+
+const char* detectColor(float v, float b, float g, float y, float o, float r)
+{
+  float vals[6] = {v, b, g, y, o, r};
+  const char* names[6] = {"VIOLET", "BLUE", "GREEN", "YELLOW", "ORANGE", "RED"};
+
+  int maxI = 0;
+  for (int i = 1; i < 6; i++) {
+    if (vals[i] > vals[maxI]) maxI = i;
+  }
+
+  float total = v + b + g + y + o + r;
+  if (total < 5.0f) return "NO SIGNAL";
+
+  return names[maxI];
+}
+
+void showText(const char* line1,
+              const char* line2 = "",
+              const char* line3 = "")
+{
   display.clearDisplay();
-  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
   display.setCursor(0, 0);
+
   display.println(line1);
-  display.println(line2);
+  if (line2[0]) display.println(line2);
+  if (line3[0]) display.println(line3);
+
   display.display();
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(500);
-
-  // Start I2C
+void setup()
+{
   Wire.begin(I2C_SDA, I2C_SCL);
 
-  // Start OLED
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println("OLED failed");
-    while (1);
+    while (1) delay(10);
   }
 
-  showMessage("Starting...", "OLED OK");
+  showText("Booting...");
 
-  // Start AS726x
+  tempSensor.begin();
+
   if (!sensor.begin(&Wire)) {
-    showMessage("AS726x Failed", "Check Wiring");
-    Serial.println("AS726x not found");
-    while (1);
+    showText("AS726x FAIL", "Check wiring");
+    while (1) delay(10);
   }
 
-  // Sensor setup
   sensor.setIntegrationTime(50);
-  sensor.setGain(3);   // 64X gain (patched)
-  sensor.drvOff();
+  sensor.setGain(3);
+  sensor.setDrvCurrent(3);
   sensor.indicateLED(false);
+  sensor.drvOff();
 
-  showMessage("Sensor Ready", "");
+  showText("Sensors OK");
   delay(1000);
 }
 
-void loop() {
+void loop()
+{
+  // ---------- TEMPERATURE ----------
+  tempSensor.requestTemperatures();
+  float tempC = tempSensor.getTempCByIndex(0);
+  bool tempOk = (tempC != DEVICE_DISCONNECTED_C);
+  float tempF = 0.0f;
+
+  if (tempOk) {
+    tempF = tempC * 9.0f / 5.0f + 32.0f;
+  }
+
+  // ---------- COLOR SENSOR ----------
+  sensor.drvOn();
+  delay(60);
 
   sensor.startMeasurement();
 
+  unsigned long start = millis();
   while (!sensor.dataReady()) {
+    if (millis() - start > 1000) {
+      sensor.drvOff();
+      showText("Color timeout");
+      delay(500);
+      return;
+    }
     delay(5);
   }
 
@@ -78,33 +131,48 @@ void loop() {
   float orange = sensor.readCalibratedOrange();
   float red    = sensor.readCalibratedRed();
 
-  // Serial output
-  Serial.print("V:");
-  Serial.print(violet, 1);
-  Serial.print(" B:");
-  Serial.print(blue, 1);
-  Serial.print(" G:");
-  Serial.print(green, 1);
-  Serial.print(" Y:");
-  Serial.print(yellow, 1);
-  Serial.print(" O:");
-  Serial.print(orange, 1);
-  Serial.print(" R:");
-  Serial.println(red, 1);
+  sensor.drvOff();
 
-  // OLED output
+  const char* colorName = detectColor(violet, blue, green, yellow, orange, red);
+
+  // ---------- OLED ----------
   display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 0);
+  display.setTextColor(SSD1306_WHITE);
 
-  display.print("V: "); display.println(violet, 1);
-  display.print("B: "); display.println(blue, 1);
-  display.print("G: "); display.println(green, 1);
-  display.print("Y: "); display.println(yellow, 1);
-  display.print("O: "); display.println(orange, 1);
-  display.print("R: "); display.println(red, 1);
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.println(colorName);
+
+  display.setTextSize(1);
+  display.setCursor(0, 20);
+
+  if (tempOk) {
+    display.print("Temp: ");
+    display.print(tempF, 1);
+    display.println(" F");
+  } else {
+    display.println("Temp: ERR");
+  }
+
+  display.setCursor(0, 34);
+  display.print("V:");
+  display.print(violet, 0);
+  display.print(" B:");
+  display.print(blue, 0);
+
+  display.setCursor(0, 44);
+  display.print("G:");
+  display.print(green, 0);
+  display.print(" Y:");
+  display.print(yellow, 0);
+
+  display.setCursor(0, 54);
+  display.print("O:");
+  display.print(orange, 0);
+  display.print(" R:");
+  display.print(red, 0);
 
   display.display();
 
-  delay(500);
+  delay(1000);
 }
