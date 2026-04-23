@@ -24,6 +24,15 @@
 #define TEMP_C_X10 250      // 25.0C (sensor has no temperature probe)
 #endif
 
+// --- TDS calibration (optional) ---
+// calibrated_tds = raw_tds * TDS_CAL_NUM / TDS_CAL_DEN
+#ifndef TDS_CAL_NUM
+#define TDS_CAL_NUM 1UL
+#endif
+#ifndef TDS_CAL_DEN
+#define TDS_CAL_DEN 1UL
+#endif
+
 // --- Saltwater "recalibration" (scaled estimate) ---
 // The SEN0244 kit is specified for ~0..1000 ppm TDS. In real seawater it will
 // typically rail/saturate near the top of that range. If you still want a
@@ -132,7 +141,13 @@ int main(void)
                    - 255.86f * comp_v * comp_v
                    + 857.39f * comp_v) * 0.5f;
         if (tds < 0.0f) tds = 0.0f;
-        uint16_t tds_ppm = (uint16_t)(tds + 0.5f);
+        uint16_t raw_tds_ppm = (uint16_t)(tds + 0.5f);
+
+        uint32_t den = (uint32_t)TDS_CAL_DEN;
+        if (den == 0UL) den = 1UL;
+        uint32_t scaled = ((uint32_t)raw_tds_ppm * (uint32_t)TDS_CAL_NUM + (den / 2UL)) / den;
+        if (scaled > 65535UL) scaled = 65535UL;
+        uint16_t tds_ppm = (uint16_t)scaled;
 #
         serial_out_str("ADC_med=");
         serial_out_u16(adc_med);

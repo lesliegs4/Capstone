@@ -72,6 +72,18 @@
 #define AS7262_AMBIENT_SUBTRACT 1
 #endif
 
+#ifndef STRIP_ROW_MEASURE_MS
+#define STRIP_ROW_MEASURE_MS 3000U
+#endif
+
+#ifndef STRIP_ROW_MOVE_DELAY_MS
+#define STRIP_ROW_MOVE_DELAY_MS 4000U
+#endif
+
+#ifndef STRIP_SAMPLE_PERIOD_MS
+#define STRIP_SAMPLE_PERIOD_MS 250U
+#endif
+
 // --- Small serial helpers ---
 static void serial_out_str(const char *s)
 {
@@ -98,15 +110,6 @@ static void serial_out_u16_dec(uint16_t v)
         v /= 10;
     }
     while (i > 0) serial_out(buf[--i]);
-}
-
-static void serial_out_i16_dec(int16_t v)
-{
-    if (v < 0) {
-        serial_out('-');
-        v = -v;
-    }
-    serial_out_u16_dec((uint16_t)v);
 }
 
 static void delay_ms(uint16_t ms)
@@ -210,6 +213,14 @@ static uint8_t u32_to_u8_scaled(uint32_t v, uint32_t vmax)
     if (x > 255UL) x = 255UL;
     return (uint8_t)x;
 }
+
+typedef struct {
+    uint8_t r8, g8, b8;
+    uint8_t valid;
+    uint8_t within;
+    uint32_t dist2;
+    int16_t est_x10; // only meaningful when ref is a range
+} row_result_t;
 
 // --- AVR TWI (I2C) ---
 #ifndef TWI_TIMEOUT_ITER
@@ -467,6 +478,85 @@ static bool as7262_measure_raw(uint8_t *temp_c,
     return true;
 }
 
+static bool as7262_sample_processed(uint8_t *temp_c,
+                                    uint16_t *v, uint16_t *b, uint16_t *g,
+                                    uint16_t *y, uint16_t *o, uint16_t *r)
+{
+#if AS7262_USE_DRV_LED && AS7262_AMBIENT_SUBTRACT
+    uint8_t temp_ambient = 0, temp_lit = 0;
+    uint16_t v0, b0, g0, y0, o0, r0;
+    uint16_t v1, b1, g1, y1, o1, r1;
+
+    if (!as7262_configure_driver_led(false, (uint8_t)AS7262_DRV_LED_CURRENT_IDX)) return false;
+    delay_ms(10);
+    if (!as7262_measure_raw(&temp_ambient, &v0, &b0, &g0, &y0, &o0, &r0)) return false;
+
+    if (!as7262_configure_driver_led(true, (uint8_t)AS7262_DRV_LED_CURRENT_IDX)) return false;
+    delay_ms(10);
+    if (!as7262_measure_raw(&temp_lit, &v1, &b1, &g1, &y1, &o1, &r1)) return false;
+
+    *temp_c = temp_lit;
+    *v = (v1 > v0) ? (uint16_t)(v1 - v0) : 0;
+    *b = (b1 > b0) ? (uint16_t)(b1 - b0) : 0;
+    *g = (g1 > g0) ? (uint16_t)(g1 - g0) : 0;
+    *y = (y1 > y0) ? (uint16_t)(y1 - y0) : 0;
+    *o = (o1 > o0) ? (uint16_t)(o1 - o0) : 0;
+    *r = (r1 > r0) ? (uint16_t)(r1 - r0) : 0;
+    return true;
+#else
+#if AS7262_USE_DRV_LED
+    // Ensure LED is on for consistent illumination.
+    if (!as7262_configure_driver_led(true, (uint8_t)AS7262_DRV_LED_CURRENT_IDX)) return false;
+#endif
+    return as7262_measure_raw(temp_c, v, b, g, y, o, r);
+#endif
+}
+
+static void channels_to_rgb_hex(uint16_t v, uint16_t b, uint16_t g,
+                                uint16_t y, uint16_t o, uint16_t r,
+                                uint8_t *r8, uint8_t *g8, uint8_t *b8)
+{
+    // Simple 6-band → RGB approximation:
+    // - boost blue with violet, boost green with yellow, boost red with orange
+    uint32_t r_mix = (uint32_t)r + ((uint32_t)o >> 1);
+    uint32_t g_mix = (uint32_t)g + ((uint32_t)y >> 1);
+    uint32_t b_mix = (uint32_t)b + ((uint32_t)v >> 1);
+
+    uint32_t max_rgb = r_mix;
+    if (g_mix > max_rgb) max_rgb = g_mix;
+    if (b_mix > max_rgb) max_rgb = b_mix;
+
+    *r8 = u32_to_u8_scaled(r_mix, max_rgb);
+    *g8 = u32_to_u8_scaled(g_mix, max_rgb);
+    *b8 = u32_to_u8_scaled(b_mix, max_rgb);
+}
+
+static void match_ref(const color_ref_t *ref,
+                      uint8_t r8, uint8_t g8, uint8_t b8,
+                      uint8_t *within_out,
+                      int16_t *est_x10_out,
+                      uint32_t *dist2_out)
+{
+    uint16_t t = 0;
+    uint32_t d2;
+    if (ref->is_range) {
+        d2 = rgb_dist2_segment(r8, g8, b8,
+                               ref->lo_r, ref->lo_g, ref->lo_b,
+                               ref->hi_r, ref->hi_g, ref->hi_b,
+                               &t);
+        int32_t span = (int32_t)ref->val_hi_x10 - (int32_t)ref->val_lo_x10;
+        int32_t est = (int32_t)ref->val_lo_x10 + (int32_t)(((int64_t)span * t) >> 16);
+        *est_x10_out = (int16_t)est;
+    } else {
+        d2 = rgb_dist2_point(r8, g8, b8, ref->lo_r, ref->lo_g, ref->lo_b);
+        *est_x10_out = ref->val_lo_x10;
+    }
+
+    uint32_t thr2 = (uint32_t)REF_MATCH_MAX_DIST * (uint32_t)REF_MATCH_MAX_DIST;
+    *within_out = (d2 <= thr2) ? 1 : 0;
+    *dist2_out = d2;
+}
+
 int main(void)
 {
     serial_init();
@@ -485,138 +575,111 @@ int main(void)
     serial_out_str("AS7262 OK\r\n");
 
     while (1) {
-        uint8_t temp_c = 0;
-        uint16_t v, b, g, y, o, r;
-
-#if AS7262_USE_DRV_LED && AS7262_AMBIENT_SUBTRACT
-        uint8_t temp_ambient = 0, temp_lit = 0;
-        uint16_t v0, b0, g0, y0, o0, r0;
-        uint16_t v1, b1, g1, y1, o1, r1;
-
-        if (!as7262_configure_driver_led(false, (uint8_t)AS7262_DRV_LED_CURRENT_IDX)) {
-            serial_out_str("ERROR: LED off\r\n");
-            delay_ms(500);
-            continue;
-        }
-        delay_ms(10);
-        if (!as7262_measure_raw(&temp_ambient, &v0, &b0, &g0, &y0, &o0, &r0)) {
-            serial_out_str("ERROR: ambient sample\r\n");
-            delay_ms(500);
-            continue;
+        row_result_t results[4];
+        for (uint8_t i = 0; i < 4; i++) {
+            results[i].valid = 0;
+            results[i].within = 0;
+            results[i].dist2 = 0xFFFFFFFFUL;
+            results[i].est_x10 = 0;
+            results[i].r8 = results[i].g8 = results[i].b8 = 0;
         }
 
-        if (!as7262_configure_driver_led(true, (uint8_t)AS7262_DRV_LED_CURRENT_IDX)) {
-            serial_out_str("ERROR: LED on\r\n");
-            delay_ms(500);
-            continue;
-        }
-        delay_ms(10);
-        if (!as7262_measure_raw(&temp_lit, &v1, &b1, &g1, &y1, &o1, &r1)) {
-            serial_out_str("ERROR: lit sample\r\n");
-            delay_ms(500);
-            continue;
-        }
+        for (uint8_t row = 0; row < 4; row++) {
+            serial_out_str("ROW ");
+            serial_out_u16_dec((uint16_t)(row + 1));
+            serial_out_str(": measure ~");
+            serial_out_u16_dec((uint16_t)STRIP_ROW_MEASURE_MS);
+            serial_out_str("ms\r\n");
 
-        temp_c = temp_lit;
-        v = (v1 > v0) ? (uint16_t)(v1 - v0) : 0;
-        b = (b1 > b0) ? (uint16_t)(b1 - b0) : 0;
-        g = (g1 > g0) ? (uint16_t)(g1 - g0) : 0;
-        y = (y1 > y0) ? (uint16_t)(y1 - y0) : 0;
-        o = (o1 > o0) ? (uint16_t)(o1 - o0) : 0;
-        r = (r1 > r0) ? (uint16_t)(r1 - r0) : 0;
-#else
-        if (!as7262_measure_raw(&temp_c, &v, &b, &g, &y, &o, &r)) {
-            serial_out_str("ERROR: sample\r\n");
-            delay_ms(500);
-            continue;
-        }
+            uint32_t sum_v = 0, sum_b = 0, sum_g = 0, sum_y = 0, sum_o = 0, sum_r = 0;
+            uint16_t samples = 0;
+
+            uint16_t elapsed = 0;
+            while (elapsed < (uint16_t)STRIP_ROW_MEASURE_MS) {
+                uint8_t temp_c = 0;
+                uint16_t v, b, g, y, o, r;
+                if (as7262_sample_processed(&temp_c, &v, &b, &g, &y, &o, &r)) {
+                    sum_v += v;
+                    sum_b += b;
+                    sum_g += g;
+                    sum_y += y;
+                    sum_o += o;
+                    sum_r += r;
+                    samples++;
+                }
+                delay_ms((uint16_t)STRIP_SAMPLE_PERIOD_MS);
+                elapsed = (uint16_t)(elapsed + (uint16_t)STRIP_SAMPLE_PERIOD_MS);
+            }
+
+            if (samples == 0) {
+                serial_out_str("ROW ");
+                serial_out_u16_dec((uint16_t)(row + 1));
+                serial_out_str(": ERROR no samples\r\n");
+            } else {
+                uint16_t v_avg = (uint16_t)(sum_v / samples);
+                uint16_t b_avg = (uint16_t)(sum_b / samples);
+                uint16_t g_avg = (uint16_t)(sum_g / samples);
+                uint16_t y_avg = (uint16_t)(sum_y / samples);
+                uint16_t o_avg = (uint16_t)(sum_o / samples);
+                uint16_t r_avg = (uint16_t)(sum_r / samples);
+
+                uint8_t r8, g8, b8;
+                channels_to_rgb_hex(v_avg, b_avg, g_avg, y_avg, o_avg, r_avg, &r8, &g8, &b8);
+
+                results[row].r8 = r8;
+                results[row].g8 = g8;
+                results[row].b8 = b8;
+                results[row].valid = 1;
+
+                uint8_t within;
+                int16_t est_x10;
+                uint32_t dist2;
+                match_ref(&SAFE_REFS[row], r8, g8, b8, &within, &est_x10, &dist2);
+                results[row].within = within;
+                results[row].est_x10 = est_x10;
+                results[row].dist2 = dist2;
+            }
+
+#if AS7262_USE_DRV_LED
+            (void)as7262_configure_driver_led(false, (uint8_t)AS7262_DRV_LED_CURRENT_IDX);
 #endif
-
-        serial_out_str("T=");
-        serial_out_i16_dec((int16_t)temp_c);
-        serial_out_str("C ");
-
-        serial_out_str("V=");
-        serial_out_u16_dec(v);
-        serial_out_str(" B=");
-        serial_out_u16_dec(b);
-        serial_out_str(" G=");
-        serial_out_u16_dec(g);
-        serial_out_str(" Y=");
-        serial_out_u16_dec(y);
-        serial_out_str(" O=");
-        serial_out_u16_dec(o);
-        serial_out_str(" R=");
-        serial_out_u16_dec(r);
-
-        // Simple 6-band → RGB approximation:
-        // - boost blue with violet, boost green with yellow, boost red with orange
-        uint32_t r_mix = (uint32_t)r + ((uint32_t)o >> 1);
-        uint32_t g_mix = (uint32_t)g + ((uint32_t)y >> 1);
-        uint32_t b_mix = (uint32_t)b + ((uint32_t)v >> 1);
-
-        uint32_t max_rgb = r_mix;
-        if (g_mix > max_rgb) max_rgb = g_mix;
-        if (b_mix > max_rgb) max_rgb = b_mix;
-
-        uint8_t r8 = u32_to_u8_scaled(r_mix, max_rgb);
-        uint8_t g8 = u32_to_u8_scaled(g_mix, max_rgb);
-        uint8_t b8 = u32_to_u8_scaled(b_mix, max_rgb);
-
-        serial_out_str(" HEX=#");
-        serial_out_u8_hex(r8);
-        serial_out_u8_hex(g8);
-        serial_out_u8_hex(b8);
-
-        // Match against provided "safe" reference colors.
-        uint32_t best_d2 = 0xFFFFFFFFUL;
-        uint16_t best_t = 0;
-        const color_ref_t *best = 0;
-
-        for (uint8_t i = 0; i < (uint8_t)(sizeof(SAFE_REFS) / sizeof(SAFE_REFS[0])); i++) {
-            const color_ref_t *ref = &SAFE_REFS[i];
-            uint32_t d2;
-            uint16_t t = 0;
-            if (ref->is_range) {
-                d2 = rgb_dist2_segment(r8, g8, b8,
-                                       ref->lo_r, ref->lo_g, ref->lo_b,
-                                       ref->hi_r, ref->hi_g, ref->hi_b,
-                                       &t);
-            } else {
-                d2 = rgb_dist2_point(r8, g8, b8, ref->lo_r, ref->lo_g, ref->lo_b);
-            }
-            if (d2 < best_d2) {
-                best_d2 = d2;
-                best_t = t;
-                best = ref;
+            if (row < 3) {
+                serial_out_str("Move to next row (wait ");
+                serial_out_u16_dec((uint16_t)STRIP_ROW_MOVE_DELAY_MS);
+                serial_out_str("ms)\r\n");
+                delay_ms((uint16_t)STRIP_ROW_MOVE_DELAY_MS);
             }
         }
 
-        uint32_t thr2 = (uint32_t)REF_MATCH_MAX_DIST * (uint32_t)REF_MATCH_MAX_DIST;
-        if (best) {
-            serial_out_str(" REF=");
-            serial_out_str(best->name);
+        serial_out_str("---- STRIP RESULTS ----\r\n");
+        for (uint8_t row = 0; row < 4; row++) {
+            serial_out_str("ROW ");
+            serial_out_u16_dec((uint16_t)(row + 1));
+            serial_out_str(" ");
+            serial_out_str(SAFE_REFS[row].name);
+            serial_out_str(" HEX=#");
+            serial_out_u8_hex(results[row].r8);
+            serial_out_u8_hex(results[row].g8);
+            serial_out_u8_hex(results[row].b8);
 
-            if (best_d2 <= thr2) {
-                serial_out_str(" (MATCH)");
-            } else {
-                serial_out_str(" (NEAR)");
+            if (!results[row].valid) {
+                serial_out_str(" STATUS=ERROR\r\n");
+                continue;
             }
 
-            // If it's a gradient reference, emit an estimated value along the gradient.
-            if (best->is_range) {
-                int32_t span = (int32_t)best->val_hi_x10 - (int32_t)best->val_lo_x10;
-                int32_t est = (int32_t)best->val_lo_x10 + (int32_t)(((int64_t)span * best_t) >> 16);
+            serial_out_str(" IN_RANGE=");
+            serial_out_str(results[row].within ? "YES" : "NO");
+
+            if (SAFE_REFS[row].is_range) {
                 serial_out_str(" est=");
-                serial_out_x10_value((int16_t)est);
+                serial_out_x10_value(results[row].est_x10);
                 serial_out(' ');
-                serial_out_str(best->units);
+                serial_out_str(SAFE_REFS[row].units);
             }
+
+            serial_out_str("\r\n");
         }
-
-        serial_out_str("\r\n");
-
-        delay_ms(500);
+        serial_out_str("-----------------------\r\n\r\n");
     }
 }
 
