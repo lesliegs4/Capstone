@@ -13,6 +13,9 @@ const int WATER_SENSOR_PIN = 2;
 void setup() {
   Serial.begin(115200);
 
+  delay(1000);
+  Serial.println("ESP32-C3 started!");
+
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println("OLED failed");
     while (true);
