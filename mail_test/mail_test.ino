@@ -1,5 +1,11 @@
 #include <WiFi.h>
 #include <ESP_Mail_Client.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+Adafruit_SSD1306 d(128, 64, &Wire, -1);
+SMTPSession smtp;
 
 #define WIFI_SSID "Leslie"
 #define WIFI_PASSWORD "leslie04"
@@ -12,57 +18,79 @@
 
 #define RECIPIENT_EMAIL "lesliegs409@gmail.com"
 
-SMTPSession smtp;
-
-void setup() {
-  Serial.begin(9600);
-  delay(1000);
-
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting");
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("\nConnected!");
-
-  sendEmail();
+void msg(const char* a, const char* b = "") {
+  d.clearDisplay();
+  d.setCursor(0, 18);
+  d.setTextSize(1);
+  d.setTextColor(WHITE);
+  d.println(a);
+  d.println(b);
+  d.display();
 }
 
-void loop() {}
+void fish(int x, int y) {
+  d.fillTriangle(x, y, x+7, y-4, x+7, y+4, WHITE);
+  d.fillRoundRect(x+7, y-5, 17, 10, 5, WHITE);
+  d.fillCircle(x+20, y-2, 1, BLACK);
+}
 
-void sendEmail() {
+void sendMail() {
+  msg("Sending email...");
 
-  ESP_Mail_Session session;
+  ESP_Mail_Session s;
+  s.server.host_name = "smtp.gmail.com";
+  s.server.port = 465;
+  s.login.email = AUTHOR_EMAIL;
+  s.login.password = AUTHOR_PASSWORD;
 
-  session.server.host_name = SMTP_HOST;
-  session.server.port = SMTP_PORT;
+  SMTP_Message m;
+  m.sender.name = "ESP32";
+  m.sender.email = AUTHOR_EMAIL;
+  m.subject = "ESP32 Alert";
+  m.addRecipient("Leslie", RECIPIENT_EMAIL);
+  m.text.content = "ESP32 test alert sent successfully.";
 
-  session.login.email = AUTHOR_EMAIL;
-  session.login.password = AUTHOR_PASSWORD;
-
-  SMTP_Message message;
-
-  message.sender.name = "ESP32";
-  message.sender.email = AUTHOR_EMAIL;
-  message.subject = "ESP32 Test";
-  message.addRecipient("Leslie", RECIPIENT_EMAIL);
-
-  message.text.content = "This is a direct Gmail test from ESP32! Este es el segundo correo";
-  message.text.charSet = "us-ascii";
-
-  if (!smtp.connect(&session)) {
-    Serial.println("SMTP failed");
+  if (!smtp.connect(&s)) {
+    msg("SMTP failed");
     return;
   }
 
-  if (!MailClient.sendMail(&smtp, &message)) {
-    Serial.println(smtp.errorReason());
-  } else {
-    Serial.println("Email sent!");
-  }
+  if (MailClient.sendMail(&smtp, &m)) msg("Email sent!", "Check inbox");
+  else msg("Email failed");
 
   smtp.closeSession();
+  delay(3000);
+}
+
+void setup() {
+  d.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  d.clearDisplay();
+  d.display();
+
+  msg("Connecting WiFi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  int t = 0;
+  while (WiFi.status() != WL_CONNECTED && t++ < 40) delay(500);
+
+  if (WiFi.status() != WL_CONNECTED) {
+    msg("WiFi failed", "Check hotspot");
+    while (1);
+  }
+
+  msg("WiFi connected!");
+  delay(1000);
+  sendMail();
+}
+
+void loop() {
+  for (int x = -30; x < 130; x += 5) {
+    d.clearDisplay();
+    d.setCursor(20, 5);
+    d.println("Idle");
+    fish(x, 32);
+    fish(x - 45, 48);
+    d.display();
+    delay(130);
+  }
 }
