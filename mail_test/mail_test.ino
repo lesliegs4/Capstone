@@ -24,6 +24,8 @@
 #define VREF 3.3
 #define SCOUNT 30
 
+#define TEMP_PIN 5
+
 #define WIFI_SSID "Leslie"
 #define WIFI_PASSWORD "leslie04"
 
@@ -82,7 +84,8 @@ void loop() {
   if (screen == 0) showWaterScreen();
   else if (screen == 1) showColorTempScreen();
   else if (screen == 2) showTDSScreen();
-  else if (screen == 3) showWiFiScreen();
+  else if (screen == 3) showTempScreen();
+  else if (screen == 4) showWiFiScreen();
   
 
   delay(150);
@@ -99,18 +102,18 @@ void handleJoystick() {
   // physical UP gives ">"
   if (y < 1200) {
     screen++;
-    if (screen > 2) screen = 0;
+    if (screen > 4) screen = 0;
     lastMove = millis();
   }
 
   // physical DOWN gives "<"
   if (y > 2800) {
     screen--;
-    if (screen < 0) screen = 3;
+    if (screen < 0) screen = 4;
     lastMove = millis();
   }
 
-  if (pressed && screen == 3) {
+  if (pressed && screen == 4) {
     sendEmail();
     lastMove = millis();
   }
@@ -159,13 +162,24 @@ void showColorTempScreen() {
   display.clearDisplay();
 
   if (!colorOK) {
-    display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.println("Screen 2: Color");
-    display.println("AS726x FAIL");
-    display.println("Check wiring");
-    display.display();
-    return;
+    colorOK = colorSensor.begin(&Wire);
+
+    if (colorOK) {
+      colorSensor.setIntegrationTime(50);
+      colorSensor.setGain(3);
+      colorSensor.setDrvCurrent(3);
+      colorSensor.indicateLED(false);
+      colorSensor.drvOff();
+    } else {
+      display.setTextSize(1);
+      display.setCursor(0, 0);
+      display.println("Screen 2: Color");
+      display.println("AS726x FAIL");
+      display.println("Retrying...");
+      display.display();
+      delay(500);
+      return;
+    }
   }
 
   tempSensor.requestTemperatures();
@@ -277,12 +291,53 @@ void showTDSScreen() {
   display.display();
 }
 
+void showTempScreen() {
+  tempSensor.requestTemperatures();
+
+  float tempC = tempSensor.getTempCByIndex(0);
+  float tempF = tempC * 9.0 / 5.0 + 32.0;
+
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("Screen 4: Temp");
+
+  display.setTextSize(2);
+  display.setCursor(0, 18);
+
+  if (tempC == DEVICE_DISCONNECTED_C) {
+    display.println("ERROR");
+  } else {
+    display.print(tempF, 1);
+    display.println(" F");
+  }
+
+  display.setTextSize(1);
+  display.setCursor(0, 45);
+
+  if (tempC == DEVICE_DISCONNECTED_C) {
+    display.println("Check DS18B20");
+  } else {
+    display.print(tempC, 1);
+    display.println(" C");
+
+    display.setCursor(0, 55);
+    if (tempF < 72) display.println("Status: COLD");
+    else if (tempF <= 80) display.println("Status: OK");
+    else display.println("Status: HOT");
+  }
+
+  display.display();
+}
+
 void showWiFiScreen() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
 
-  display.println("Screen 4: WiFi/Mail");
+  display.println("Screen 5: WiFi/Mail");
 
   if (WiFi.status() == WL_CONNECTED) {
     display.println("WiFi: Connected");
