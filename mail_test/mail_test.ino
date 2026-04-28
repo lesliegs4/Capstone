@@ -14,7 +14,7 @@
 #define JOY_X 0
 #define JOY_Y 1
 #define JOY_BTN 2
-#define TEMP_PIN 4
+#define TEMP_PIN 5
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -23,8 +23,6 @@
 #define TDS_PIN 4
 #define VREF 3.3
 #define SCOUNT 30
-
-#define TEMP_PIN 5
 
 #define WIFI_SSID "Leslie"
 #define WIFI_PASSWORD "leslie04"
@@ -51,6 +49,9 @@ unsigned long lastMove = 0;
 int tdsBuffer[SCOUNT];
 int tdsIndex = 0;
 float tdsValue = 0;
+
+int lastScreen = -1;
+bool emailSentThisVisit = false;
 
 void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -81,12 +82,23 @@ void setup() {
 void loop() {
   handleJoystick();
 
+  if (screen != lastScreen) {
+    emailSentThisVisit = false;
+    lastScreen = screen;
+  }
+
   if (screen == 0) showWaterScreen();
   else if (screen == 1) showColorTempScreen();
   else if (screen == 2) showTDSScreen();
   else if (screen == 3) showTempScreen();
-  else if (screen == 4) showWiFiScreen();
-  
+  else if (screen == 4) {
+    showWiFiScreen();
+
+    if (!emailSentThisVisit && WiFi.status() == WL_CONNECTED) {
+      emailSentThisVisit = true;
+      sendEmail();
+    }
+  }
 
   delay(150);
 }
@@ -96,25 +108,18 @@ void handleJoystick() {
 
   int x = analogRead(JOY_X);
   int y = analogRead(JOY_Y);
-  bool pressed = digitalRead(JOY_BTN) == LOW;
 
-  // rotated mapping from your previous setup:
-  // physical UP gives ">"
-  if (y < 1200) {
+  // LEFT or UP = next screen
+  if (y < 1200 || x < 1200) {
     screen++;
     if (screen > 4) screen = 0;
     lastMove = millis();
   }
 
-  // physical DOWN gives "<"
-  if (y > 2800) {
+  // RIGHT or DOWN = previous screen
+  else if (y > 2800 || x > 2800) {
     screen--;
     if (screen < 0) screen = 4;
-    lastMove = millis();
-  }
-
-  if (pressed && screen == 4) {
-    sendEmail();
     lastMove = millis();
   }
 }
@@ -135,9 +140,9 @@ void showWaterScreen() {
   display.setTextSize(1);
   display.setCursor(0, 50);
 
-  if (value < 500) display.println("Status: DRY");
-  else if (value < 1500) display.println("Status: LOW");
-  else if (value < 3000) display.println("Status: MEDIUM");
+  if (value < 218) display.println("Status: DRY");
+  else if (value < 230) display.println("Status: LOW");
+  else if (value < 250) display.println("Status: MEDIUM");
   else display.println("Status: HIGH");
 
   display.display();
@@ -220,13 +225,13 @@ void showColorTempScreen() {
   display.setTextSize(1);
   display.setCursor(0, 20);
 
-  if (tempC == DEVICE_DISCONNECTED_C) {
-    display.println("Temp: ERR");
-  } else {
-    display.print("Temp: ");
-    display.print(tempF, 1);
-    display.println(" F");
-  }
+  // if (tempC == DEVICE_DISCONNECTED_C) {
+  //   display.println("Temp: ERR");
+  // } else {
+  //   display.print("Temp: ");
+  //   display.print(tempF, 1);
+  //   display.println(" F");
+  // }
 
   display.setCursor(0, 34);
   display.print("V:");
@@ -348,24 +353,41 @@ void showWiFiScreen() {
   }
 
   display.println();
-  display.println("Press joystick");
-  display.println("to send email");
 
-  if (emailSent) display.println("Email: SENT");
-  else display.println("Email: not sent");
+  if (!emailSentThisVisit) {
+    display.println("Email: pending");
+  } else if (emailSent) {
+    display.println("Email: SENT");
+  } else {
+    display.println("Email: FAILED");
+  }
 
   display.display();
 }
 
+bool isButtonPressed() {
+  int pressedCount = 0;
+
+  for (int i = 0; i < 5; i++) {
+    if (digitalRead(JOY_BTN) == LOW) pressedCount++;
+    delay(5);
+  }
+
+  return pressedCount >= 3;
+}
+
 void sendEmail() {
   display.clearDisplay();
+  display.setTextSize(1);
   display.setCursor(0, 0);
   display.println("Sending email...");
   display.display();
 
   if (WiFi.status() != WL_CONNECTED) {
+    emailSent = false;
     display.println("WiFi not ready");
     display.display();
+    delay(1500);
     return;
   }
 
@@ -374,6 +396,7 @@ void sendEmail() {
   session.server.port = SMTP_PORT;
   session.login.email = AUTHOR_EMAIL;
   session.login.password = AUTHOR_PASSWORD;
+  session.login.user_domain = "";
 
   SMTP_Message msg;
   msg.sender.name = "ESP32 Tank";
@@ -381,14 +404,19 @@ void sendEmail() {
   msg.subject = "ESP32 Tank Test";
   msg.addRecipient("Leslie", RECIPIENT_EMAIL);
   msg.text.content = "ESP32 tank monitor test email sent successfully.";
+  msg.text.charSet = "us-ascii";
+  msg.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
 
   if (!smtp.connect(&session)) {
     emailSent = false;
+    delay(1500);
     return;
   }
 
   emailSent = MailClient.sendMail(&smtp, &msg);
   smtp.closeSession();
+
+  delay(1500);
 }
 
 // void loop() {
